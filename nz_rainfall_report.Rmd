@@ -1,0 +1,803 @@
+---
+title: "Rainfall Prediction in New Zealand"
+subtitle: "A machine learning project"
+author: "Alexandre Monteiro"
+date: \today
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: yes
+    df_print: kable
+fontsize: 10pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(kableExtra)
+
+## Libraries
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(gam)
+```
+
+# Preface {-}
+This report is a submission for the capstone project of HarvardX's Data Science Professional Certificate^[https://www.edx.org/professional-certificate/harvardx-data-science].It is based on a dataset of rainfall registers for 30 sites across New Zealand^[https://www.stats.govt.nz/indicators/rainfall] made avaiable on Kaggle^[https://www.kaggle.com/pralabhpoudel/nz-rainfall-dataset] by user Pralabh Poudel^[https://www.kaggle.com/pralabhpoudel].
+The datasets are licensed under a Creative Commons Attribution 4.0 International License.
+
+# Introduction
+Rain is a vital resource for life. Be it to drink, to grow our food or to generate energy, water supply greatly depends on rainfall and changes in ammount or timing can have great impact on how we live our lives. New Zealand makes avaiable data on annual and seasonal rainfall at 30 sites from 1960 to 2019 and these data will be used on this project to build a machine learning algorithm to predict rainfall for each of these avaiable sites, which are representative of the area were they are measured. Criteria used to select the 30 sites is described in Macara et al. (2020).
+
+Machine learning techniques can help us to find patterns in data and transform it into useful information. In this case, our purpose is to find and train an algorithm to better predict rainfall.
+
+## Rainfall Dataset
+From the three datasets made avaiable on Kaggle, we will focus on the _state_data_ dataset, which contains the rainfall data - measured in milimiters - for each station, summarized by season and by annual precipitation.
+
+## Model Evaluation
+The proposed model is to return the rainfall from the other predictors (site, season, year). That means the algorithm will returne a regression value and a loss function is ideal to evaluate our predictions. The loss function of our choice is the root mean square error (RMSE) since it is one of the most usual tools and fits well to our purpose.
+
+The chosen function is defined by the following formula:
+
+$$RMSE = \sqrt{\frac{1}{N}\sum_{i,u}(\hat{y}_{i,u} - y_{i,u})^2}$$
+
+Where $N$ is the total number of rainfall values in the dataset, $y_{i,u}$ is the registered rainfall for season $i$ (Summer of 1970, Spring of 2015 or Year of 2000, for example) at the site $u$ and $\hat{y}_{i,u}$ is the prediction of rainfall for that season $i$ at that site $u$.
+
+# Data and Analysis
+
+Our first step is to download our data and examine it to understand how they are related and understand which are the most useful columns to be used as predictors.
+
+## Data Aquisition
+
+```{r warning=FALSE, message=FALSE}
+# Load data
+state_data <- read_csv("state_data.csv")
+```
+
+The first few lines of the dataset are as follows:
+
+```{r warning=FALSE, message=FALSE}
+# The first few lines
+head(state_data, n=10) %>%
+  kbl(booktabs = TRUE,
+      caption = "The first 10 lines of the original data") %>%
+  kable_styling(latex_options = c("scale_down", "hold_position"))
+```
+
+From this, we can see that the _reference_period_ column has only one value (that can be verified by extracting the unique values), and that it can be removed from the table. According to the New Zealand Government Statitcs Site for the rainfall^[https://www.stats.govt.nz/indicators/rainfall], Daily rainfall is measured from 9am to 9am of the following day, with missing data being replaced with adjusted daily Virtual Climate Station Network (VCSN) data from 1960 onwards. Then, the accumulated rainfall is calculated by aggregating daily rainfall data. This was done annually, and for each meteorological season of the year: Summrer = December (previous year) - Janyary - February, Autumn = March - April - May, Winter = June - July - August, and Spring = September - October - November. Using this information, the columns _period_start_ and _period_end_ can be replaced for simplicity by a column containing the year of _period_end_. Thus, for example, the period of 1979-12-01 to 1980-02-28 can be referenced as Summer of 1980. This is consistent with the calculation of the rainfall baseline (described bellow). The columns _agent_number_, _lat_ & _lon_ (considered as a pair), and _site_ are ways to describe the same information: the identity of the meteorological stations that gave origin to the data, so, for this report`s purpose, it suffices to use only the _site_ name to describe the stations in a unique way.
+
+The _precipitation_ column contains the calculated rainfall for that specific time period (Season or Year). In our model, _anomaly_ will be our **outcome** variable and the other selected features will be our **predictors**. Since anomaly is a continuous variable, we will build a **predictive model**.
+
+Finally, the original dataset can be simplified as follows:
+
+```{r warning=FALSE, message=FALSE}
+# Data adjustments
+state_data <- state_data %>%
+  mutate(year = year(period_end)) %>%
+  select(-reference_period, -agent_number, -period_start, 
+         -period_end, -lat, -lon) %>%
+  select(site, season, year, precipitation, anomaly)
+```
+
+And the first few lines of our work dataset are:
+
+```{r warning=FALSE, message=FALSE}
+# The first few lines
+head(state_data, n=10) %>%
+  kbl(booktabs = TRUE,
+      caption = "The first 10 lines of the work dataset") %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## Baseline
+
+The baseline is the long term average of the precipitation values. It is used to calculate anomaly, which is the difference between the actual value for a period and the 30-year long average. The dataset reference baseline is the average of rainfall for each season, and annual, between 1961 and 1990.
+
+```{r}
+# Baseline
+#
+# Baseline is used to calculate the rainfall anommaly. Simply put, anomaly
+# is the diference between the actual value of rainfall and a long term
+# average. Our baseline will be the average precipitation for a period of
+# 30 years, namely 1961 to 1990.
+# We have to take into account that, for purposes of methodology, Summer
+# is the period encompassed between December, 1st and March, 1st (open
+# end) of the following year and is counted for that year, ie, from
+# 1970-12-01 to 1971-02-28 the period is named Summer of 1971.
+# That is why the filter is made using 'period_end' column.
+# Although the data is avaiable as a column of the dataset, the
+# calculation is performed for the sake of verification.
+baseline <- state_data %>%
+  filter(year >= 1961,
+         year < 1991) %>%
+  group_by(season, site) %>%
+  summarize(base_precip = mean(precipitation))
+```
+
+## Data preparation
+
+Having settled on the dataset structure, definining which columns will be the features (site, season, year, precipitation) and which is the outcome (anomaly), it is time to divide the data set for training and verification of the algorithms.
+
+The original _state_data_ dataset will be divided into two sets: a _rainfall_ dataset, that will contain 90% of the data and will be used to train the algorithms, and the _verification_ dataset, that will contain the other 10% of the data and will be used only in the final verification.
+
+In order to train the algorithms properly, the _rainfall_ dataset will be divided again into two datasets, _train_set_ and _test_set_, in order to execute proper cross validation of the training data while tuning the algorithms.
+
+```{r warning=FALSE, message=FALSE}
+# Now separate the state_data dataset into 'rainfall' and 'verification'
+# datasets. The 'rainfall'dataset will be used to train the algorithm
+# and will have 90% of the total data. The 'verification' dataset will
+# be used in the final verification and will have the other 10% of the
+# data.
+
+# Setting the random seed
+# if using R 3.5 or earlier, use `set.seed(2021)`
+set.seed(2021, sample.kind = "Rounding") 
+
+test_ind <- createDataPartition(y = state_data$precipitation,
+                                times = 1, p = 0.1, list = FALSE)
+rainfall <- state_data[-test_ind,]
+verification <- state_data[test_ind,]
+
+# Dividing the 'rainfall' dataset again into a 'train_set' and a
+# 'test_set' that will be used during the algorithm training.
+# The 'train_set'will have 90% of the data in the 'rainfall' dataset amd
+# the 'test_set' will have the other 10% of the data in the 'rainfall'
+# dataset.
+test_ind <- createDataPartition(y = rainfall$precipitation,
+                                times = 1, p = 0.1, list = FALSE)
+
+train_set <- rainfall[-test_ind,]
+test_set <- rainfall[test_ind,]
+
+remove(test_ind)
+```
+
+## Data exploration
+
+The _rainfall_ dataset will be used to make data exploration, in order to better understand our data. By doing this exploration, we will have a beter idea on how to construct our algorithm.
+
+The structure of the dataset is as follows:
+
+```{r warning=FALSE, message=FALSE}
+# Data structure
+str(rainfall)
+```
+
+The _rainfall_ dataset is comprised of five columns: site, season, year, precipitation and anomaly. Each line of the dataset represents the precipitation (and its anomaly regarding the long term average) for a particular site during a particular season in a specific year. There are a total of `r nrow(rainfall)` rows of data.  A data summary for the dataset:
+
+```{r warning=FALSE, message=FALSE}
+# Data summary
+summary(rainfall)
+```
+
+We can check if there is any blank in the dataset:
+
+```{r}
+# Check for blank data
+count_blank <- function(name) {
+  sum(is.na(rainfall[, name]))
+}
+
+sapply(names(rainfall), count_blank)
+```
+
+And the first lines of the _rainfall_ dataset can be seen here:
+
+```{r warning=FALSE, message=FALSE}
+# The first few lines
+head(state_data, n=10) %>%
+  kbl(booktabs = TRUE,
+      caption = "The first 10 lines of the rainfall dataset") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+### Climate stations and seasons
+
+The climate station names and season names are simple categorical variables, and the list of unique values that are in the _rainfall_ dataset are listed bellow:
+
+```{r warning=FALSE, message=FALSE}
+# Exploration
+unique(rainfall$site)
+unique(rainfall$season)
+```
+
+### Precipitation
+
+The average precipoitation for each site and for each season is:
+
+```{r warning=FALSE, message=FALSE}
+# Mean rainfall values by season and site
+rainfall %>%
+  group_by(season, site) %>%
+  summarize(mean_rainfall = mean(precipitation)) %>%
+  pivot_wider(names_from = season,
+              values_from = mean_rainfall) %>%
+  kbl(booktabs = TRUE,
+      caption = "Average precipitation for each site and each season.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+And the evolution of annual precipitation through the years for all sites can be put on a graph:
+
+```{r warning=FALSE, message=FALSE}
+# Annual precipitation data for all sites
+rainfall %>%
+  filter(season == "Annual") %>%
+  ggplot(aes(x = year,
+             y = precipitation)) +
+  geom_line() +
+  facet_wrap(. ~ site, ncol = 5) +
+  ggtitle("Precipitation in New Zealand",
+          subtitle = "Annual, 1960-2019")
+```
+
+From this graph, we can see that Milford Sound registers values of precipitation much higher than the other climate sites.
+
+To give an example, and better visualize the precipitation, curve, here is the plot for Summer rainfall through the years for Milford Sound climate station.
+
+```{r warning=FALSE, message=FALSE}
+# Take one station as an examble
+
+# Get its baseline value
+base_precip <- baseline %>%
+  filter(site == "Milford Sound",
+         season == "Summer") %>%
+  pull(base_precip)
+
+# Plot the graph
+rainfall %>%
+  filter(season == "Summer",
+         site == "Milford Sound") %>%
+  ggplot(aes(x = year, y = precipitation)) +
+  geom_line() +
+  geom_point() +
+  geom_line(aes(y = mean(precipitation),
+                lty = "mean precipitation"),
+            col = "darkred",
+            size = 1) +
+  geom_line(aes(y = base_precip,
+                lty = "baseline"),
+            col = "darkgreen",
+            size = 1) +
+  ggtitle("Precipitations during summer in Milford Sound",
+          subtitle = "1960-2019") +
+  labs(linetype = NULL)
+```
+
+The distribution of precipitation throughout the dataset is:
+
+```{r warning=FALSE, message=FALSE}
+# Rain distribution
+rainfall %>%
+  ggplot(aes(x = precipitation,
+             fill = season)) +
+  geom_histogram(color = "black",
+                 binwidth = 500,
+                 position = "dodge") +
+  ggtitle("Distribution of precipitations in the dataset")
+```
+
+```{r warning=FALSE, message=FALSE}
+rainfall %>%
+  group_by(season) %>%
+  summarize(mean = mean(precipitation),
+            q75 = quantile(precipitation, 0.75)) %>%
+  kbl(booktabs = TRUE,
+      caption = "Rain distribution: mean and 75th percentile.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+From this, it shows that there is not much difference in precipitation values between seasons, with slightly more rain in winter and slightly less rain during summer. It is usual to observe a rainfall of 420 mm or less in a typical season, and 1300 mm or less in a typical year.
+
+### Anomaly
+
+The distribution of anomalies in the data set can be seen in the following graph.
+
+```{r warning=FALSE, message=FALSE}
+# Anomaly distribution
+# Rain distribution
+rainfall %>%
+  ggplot(aes(x = anomaly,
+             fill = season)) +
+  geom_histogram(color = "black",
+                 binwidth = 500,
+                 position = "dodge") +
+  ggtitle("Distribution of anomaly in the dataset")
+```
+
+
+# Modeling
+Our objective is to predict the anomaly for each of the 30 climate stations in our report. The _rainfall_ dataset has three predictors (site, season, and year) and one outcome (precipitation). Since our outcome is continuous, we are going to model a few algorithms suitable to work with continuous variables. With this in mind, five algorythms were chosen, four of them were used before during the Machine Learning course, the last one was selected for being a robust algorithm with a criterion to avoid overtraining.
+
+The models chosen to be applied to the model are: Linear Regression, k-Nearest Nighbors, Generalized Adictive Method with LOESS (gam loess), Regression Tree, and Bayesian Regularized Neural Network (brnn).Linear Regression, as the most basic model, will serve as a baseline of how algorythm will perform.
+
+# Results
+
+## Setup
+
+Our first step before running the algorithms is to setup the random seed and define the formula of the root mean square error (RMSE), which will be used to evaluate each model.
+
+```{r warning=FALSE, message=FALSE}
+##
+## Machine Learning Algorithms
+##
+
+# Our objective is to use machine learning algorythms to predict
+# precipitation anomaly for each of the 30 climate stations.
+
+# For each algorithm, the predictors will be:
+# season, precipitation, year, and site.
+
+#Set the random seed again.
+set.seed(1973, sample.kind = "Rounding")
+
+# Loss function: mean square error
+RMSE <- function(true_values, predicted_values){
+  sqrt(mean((true_values - predicted_values)^2))
+}
+
+```
+
+## Linear Regression
+
+First of all, we will gather some info on the method:
+
+```{r arning=FALSE, message=FALSE}
+#
+# First algorithm: linear regression
+#
+
+# Model info
+modelLookup("lm")
+```
+
+And then we will train the algorithm using a simple bootstrap resampling with a 10-fold cross validation, repeated 3 times. After that, we apply the data on _train_set_ to set the parameters.
+
+```{r warning=FALSE, message=FALSE}
+# Setting the control parameters
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 3)
+
+# Train the algorithm
+lmFit <- train(anomaly ~ .,
+               data = train_set,
+               method = "lm",
+               trControl = ctrl)
+```
+
+The results of the method:
+
+```{r warning=FALSE, message=FALSE}
+# Results
+lmFit
+
+# Summary
+summary(lmFit)
+```
+
+Calculating the loss function:
+
+```{r warning=FALSE, message=FALSE}
+# RMSE
+lmPredict <- predict(lmFit,newdata = test_set)
+error_value <- RMSE(test_set$anomaly, lmPredict)
+
+# Add result to tabe
+results_RMSE <- tibble(algorithm = "linear regression",
+                       RMSE = error_value)
+
+results_RMSE %>%
+   kbl(booktabs = TRUE,
+      caption = "Results table") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+And, finally, plotting the predicted values against the actual vaules on the _test_set_:
+
+```{r warning=FALSE, message=FALSE}
+# Plot predicted vs actual values in the train_set
+data.frame(x = test_set$anomaly,
+           y = lmPredict) %>%
+  ggplot(aes(x = x,
+             y = y)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  ggtitle("Alogrithm: lm") +
+  xlab("Actual data") +
+  ylab("Predicted")
+```
+
+### Findings
+
+This is the most basic algorithm and was used to set a base of compasion. We can see that for categorical variables, it is created a new numerical variable (for example _seasonSummer_) that can assume value 0 or 1, thus the categorical value can be enconded into the regression formula.
+
+The plot of the predicted data versus the real data shows the prediction is poor, specially when studyng annual values, as can be checked in the following table.
+
+```{r warning=FALSE, message=FALSE}
+# Error analysis per season
+test_set %>%
+  cbind(fitted = lmPredict) %>%
+  group_by(season) %>%
+  summarize(rmse = RMSE(anomaly, fitted)) %>%
+   kbl(booktabs = TRUE,
+      caption = "RMSE per season - Linear Regression.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+
+## k-Nearest Neighbors
+
+As with last, algorithm, we will first gather information on the method and its parameters:
+
+```{r warning=FALSE, message=FALSE}
+#
+# Second algorithm: knn
+#
+
+# Model info
+modelLookup("knn")
+```
+
+Once again, the algorithm will be trained with a 10-fold bootstrap repeated 3 times, applying the _train_set_ data to optimize the number of neighbors.
+
+```{r warning=FALSE, message=FALSE}
+# Setting the control parameters
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 3)
+
+# Train the algorithm
+knnFit <- train(anomaly ~ .,
+                data = train_set,
+                method = "knn",
+                trControl = ctrl,
+                tuneGrid = data.frame(k = seq(1,15,2)),
+                preProcess = c("center", "scale"),
+                tuneLength = 20)
+```
+
+The results are:
+
+```{r warning=FALSE, message=FALSE}
+# Results
+knnFit
+
+# Summary
+summary(knnFit)
+```
+
+And the best number of neighbors can be seen on this graph.
+
+```{r warning=FALSE, message=FALSE}
+# Best number of neighbors
+knnFit %>%
+  ggplot(aes(x = .$results[k],
+             y = .$results[RMSE])) +
+  geom_point() +
+  geom_line() +
+  ggtitle("Best number of neighbors") +
+  xlab("k") +
+  ylab("RMSE")
+```
+
+Calculating the loss function and adding the result to the results table.
+
+```{r warning=FALSE, message=FALSE}
+# Calculate RMSE
+knnPredict <- predict(knnFit,newdata = test_set)
+error_value <- RMSE(test_set$anomaly, knnPredict)
+
+# Creater a table to group the resulst of all algorithms
+results_RMSE <- results_RMSE %>%
+  rbind(tibble(algorithm = "k-nearest neighbors",
+               RMSE = error_value))
+
+results_RMSE %>%
+   kbl(booktabs = TRUE,
+      caption = "Results table") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+And plotting the predicted value of precipitation versus the actual values on the _test_set_.
+
+```{r warning=FALSE, message=FALSE}
+# Plot predicted vs actual values in the train_set
+data.frame(x = test_set$anomaly,
+           y = knnPredict) %>%
+ggplot(aes(x = x,
+           y = y)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  ggtitle("Alogrithm: knn") +
+  xlab("Actual data") +
+  ylab("Predicted")
+```
+
+### Findings
+
+The k-Nearest Neighbors algorithm performs better than linear regression, yet it still performs poorly at the Annual strata. The optimal number of neighbors is `r knnFit$bestTune`.
+
+As per linear model, the error for the Annual series is about twice the error for each season.
+
+
+```{r warning=FALSE, message=FALSE}
+# Error analysis per season
+test_set %>%
+  cbind(fitted = knnPredict) %>%
+  group_by(season) %>%
+  summarize(rmse = RMSE(anomaly, fitted)) %>%
+   kbl(booktabs = TRUE,
+      caption = "RMSE per season - knn.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+## Generalized Adictive Method with LOESS
+
+The gamLoess algorithm is the next algorithm to be considered.
+
+```{r warning=FALSE, message=FALSE}
+#
+# Third algorithm: gamLoess
+#
+
+# Model info
+modelLookup("gamLoess")
+```
+
+And the training will be conducted in similar way to the previous methods.
+
+```{r warning=FALSE, message=FALSE}
+# Setting the control parameters
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 3)
+
+grid <- expand.grid(span = seq(0.15, 0.65, len = 10),
+                    degree = 1)
+
+# Train the algorithm
+gamFit <- train(anomaly ~ .,
+                data = train_set,
+                method = "gamLoess",
+                trControl = ctrl,
+                tuneGrid = grid)
+```
+
+And the results for the algorithm.
+
+```{r warning=FALSE, message=FALSE}
+# Results
+gamFit
+
+# RMSE
+gamPredict <- predict(gamFit,newdata = test_set)
+error_value <- RMSE(test_set$anomaly, gamPredict)
+
+# Add result to tabe
+results_RMSE <- results_RMSE %>%
+  rbind(tibble(algorithm = "generalized aditive model",
+               RMSE = error_value))
+
+results_RMSE %>%
+   kbl(booktabs = TRUE,
+      caption = "Results table") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+And finally plot the predicted data versus the precipitation value on the _test_set_ dataset.
+
+```{r warning=FALSE, message=FALSE}
+# Plot predicted vs actual values in the train_set
+data.frame(x = test_set$anomaly,
+           y = gamPredict) %>%
+  ggplot(aes(x = x,
+             y = y)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  ggtitle("Alogrithm: gamLoess") +
+  xlab("Actual data") +
+  ylab("Predicted")
+```
+
+### Findings
+
+This method performs poorly even when compared with the Linear Regression results. As other algorithms, the annual series show the largesr error when compared to each season series.
+
+The algorithm determines the relationship of each individual predictor and the dependent variable.
+
+```{r warning=FALSE, message=FALSE}
+# Error analysis per season
+test_set %>%
+  cbind(fitted = gamPredict) %>%
+  group_by(season) %>%
+  summarize(rmse = RMSE(anomaly, fitted))  %>%
+   kbl(booktabs = TRUE,
+      caption = "RMSE per season - gamLoess.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+## Regression Tree
+
+The info on the regression tree algorithm avaiable on the caret package is:
+
+```{r warning=FALSE, message=FALSE}
+#
+# Fourth algorithm: regression tree
+#
+
+# Model info
+modelLookup("rpart")
+```
+
+The trainning information for this algorithm:
+
+```{r warning=FALSE, message=FALSE}
+# Setting the control parameters
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 3)
+grid <- expand.grid(cp = range(0, 3, 0.1))
+
+# Train the algorithm
+rpFit <- train(anomaly ~ .,
+               data = train_set,
+               method = "rpart",
+               trControl = ctrl,
+               tuneGrid = grid)
+```
+
+And the results:
+
+```{r warning=FALSE, message=FALSE}
+# Results
+rpFit
+
+# RMSE
+rpPredict <- predict(rpFit,newdata = test_set)
+error_value <- RMSE(test_set$anomaly, rpPredict)
+
+# Add result to tabe
+results_RMSE <- results_RMSE %>%
+  rbind(tibble(algorithm = "Regression Tree",
+               RMSE = error_value))
+results_RMSE
+```
+
+### Findings
+
+Up to now, this is the algorithm with the best results and, like the other algorithms, it performs worse for the annual precipitation data.
+
+```{r warning=FALSE, message=FALSE}
+# Error analysis per season
+test_set %>%
+  cbind(fitted = rpPredict) %>%
+  group_by(season) %>%
+  summarize(rmse = RMSE(anomaly, fitted))  %>%
+   kbl(booktabs = TRUE,
+      caption = "RMSE per season - regression tree.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+## Bayesian Regularized Neural Network
+
+The last algorithm used in this report is the Bayesian Regularized Neural Network.
+
+```{r warning=FALSE, message=FALSE}
+#
+# Fifth algorithm: Bayesian Regularized Neural Network
+#
+
+# Model info
+modelLookup("brnn")
+```
+
+The training of the algorithm is:
+
+```{r warning=FALSE, message=FALSE}
+# Setting the control parameters
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 3)
+grid <- expand.grid(neurons = seq(2,3,1))
+
+# Train the algorithm
+brnnFit <- train(anomaly ~ .,
+                 data = train_set,
+                 method = "brnn",
+                 trControl = ctrl,
+                 tuneGrid = grid)
+
+```
+
+And the results
+
+```{r warning=FALSE, message=FALSE}
+# Results
+brnnFit
+
+# RMSE
+brnnPredict <- predict(brnnFit,newdata = test_set)
+error_value <- RMSE(test_set$anomaly, brnnPredict)
+
+# Add result to tabe
+results_RMSE <- results_RMSE %>%
+  rbind(tibble(algorithm = "Bayesian Regularized Neural Network",
+               RMSE = error_value))
+results_RMSE
+```
+
+### Findings
+
+```{r warning=FALSE, message=FALSE}
+# Plot predicted vs actual values in the train_set
+data.frame(x = test_set$anomaly,
+           y = brnnPredict) %>%
+  ggplot(aes(x = x,
+             y = y)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  ggtitle("Alogrithm: brnn") +
+  xlab("Actual data") +
+  ylab("Predicted")
+
+```
+
+```{r warning=FALSE, message=FALSE}
+# Error analysis per season
+test_set %>%
+  cbind(fitted = brnnPredict) %>%
+  group_by(season) %>%
+  summarize(rmse = RMSE(anomaly, fitted))  %>%
+   kbl(booktabs = TRUE,
+      caption = "RMSE per season - brnn.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+## Final Validation
+
+Since the Bayesian algorythm had the best performance, we will use it to make the the final validation.
+
+```{r warning=FALSE, message=FALSE}
+# Given brnn is, by far, the minimum RMSE among the chosen algorithms, we
+# will run the final verification only for it.
+
+# RMSE
+brnnPredict <- predict(brnnFit,newdata = verification)
+error_value <- RMSE(verification$anomaly, brnnPredict)
+
+# Add result to tabe
+results_RMSE <- results_RMSE %>%
+  rbind(tibble(algorithm = "BRNN - Verification",
+               RMSE = error_value))
+results_RMSE
+
+
+# Plot predicted vs actual values in the train_set
+data.frame(x = verification$anomaly,
+           y = brnnPredict) %>%
+  ggplot(aes(x = x,
+             y = y)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  ggtitle("Alogrithm: brnn - Verification") +
+  xlab("Actual data") +
+  ylab("Predicted")
+```
+
+# Conclusion
+
+This report describes how machine learning algorithms can be used as a tool to solve a problem. In this case, the idea was to propose a very simple model to help predict the rain anomaly in New Zealand based on historic data of precipitation along the country. Of course, a better model can be build using aditional data such as temperature, for example.
+
+For the purpose of this report, a few algorithms were tested in order to understand how each one works. The chosen algorithms were simple linear regression, k-nearest neighnors, generalized aditive model, regression tree and bayesian regularized neural network. The last one had the best performance against the train data and was checked on the verification set and it seems to work better with different time scales, since most of the algorithms performed better for seasons but did poorly when predicting the early values. The decision to verify only the bayesian algorithm was called since the error criteria chosen to evaluate how good the models performed was so much better for brnn than the other algorithms.
+
+The idea can be used to help prediction rainfall anywhere we wish as long we can gather information on the site of interest.
+
+# Reference
+Macara, G., Nichol, S., Sutherland, D., Liley, B., Paul, V., & Srinivasan, R. (2020). Ministry for the Environment Atmosphere and Climate Report 2020: Updated Datasets supplied by NIWA (NIWA Client Report No. 2020100WN). Retrieved from [https://www.mfe.govt.nz/publications/environmental-reporting/ministry-environment-atmosphere-and-climate-report-2020-updated](https://www.mfe.govt.nz/publications/environmental-reporting/ministry-environment-atmosphere-and-climate-report-2020-updated).
+
+Irizarri, R. A., Data Analysis and Prediction Algorithms with R, 2021. Avaiable on [https://rafalab.github.io/dsbook/](https://rafalab.github.io/dsbook/)
+
+Witten, I. H., Frank, E., Hall, M. A. & Pal, C.J. Data Mining: Practical Machine Learning Tools and Techniques, 4th Edition, Elsevier, 2016.
